@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gvm.fullname" . }}-gvmd
+  labels:
+  {{- $_ := set . "applicationNameSuffix" "gvmd" }}
+  {{- include "gvm.labels" . | nindent 4 }}
+  {{- $_ := set . "applicationNameSuffix" "" }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "gvm.name" . }}-gvmd
+      app.kubernetes.io/instance: {{ include "gvm.instance" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "gvm.name" . }}-gvmd
+        app.kubernetes.io/instance: {{ include "gvm.instance" . }}
+    spec:
+    {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ tpl .Values.image.gvmd.registry . }}/{{ tpl .Values.image.gvmd.repository . }}:{{ tpl .Values.image.gvmd.tag . }}"
+          imagePullPolicy: {{ tpl .Values.image.gvmd.pullPolicy . }}
+          env:
+            - name: GVMD_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gvmd.secretName" . }}
+                  key: username
+            - name: GVMD_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gvmd.secretName" . }}
+                  key: password
+            - name: GVMD_POSTGRESQL_HOST
+              value: {{ .Release.Name }}-gvmd-db
+            - name: GVMD_POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gvmd.dbSecretName" . }}
+                  key: postgresql-password
+            - name: GVMD_POSTGRESQL_URI
+              value: "postgresql://gvmduser:$(GVMD_POSTGRESQL_PASSWORD)@$(GVMD_POSTGRESQL_HOST):5432/gvmd?application_name=gvmd"
+            {{- if and .Values.customFeedsServer.enabled .Values.customFeedsServer.setDefaultFeedServerForGVM }}
+            - name: COMMUNITY_NVT_RSYNC_FEED
+              value: rsync://{{ include "gvm.fullname" . }}-feeds-server:{{ .Values.customFeedsServer.service.port }}/nvt-feed
+            - name: COMMUNITY_CERT_RSYNC_FEED
+              value: rsync://{{ include "gvm.fullname" . }}-feeds-server:{{ .Values.customFeedsServer.service.port }}/cert-data
+            - name: COMMUNITY_SCAP_RSYNC_FEED
+              value: rsync://{{ include "gvm.fullname" . }}-feeds-server:{{ .Values.customFeedsServer.service.port }}/scap-data
+            - name: COMMUNITY_GVMD_DATA_RSYNC_FEED
+              value: rsync://{{ include "gvm.fullname" . }}-feeds-server:{{ .Values.customFeedsServer.service.port }}/data-objects/gvmd/
+            {{- end }}
+            {{- range $item := .Values.extraEnv.gvmd }}
+            - name: {{ tpl $item.name $ | quote }}
+              value: {{ tpl $item.value $ | quote }}
+            {{- end }}
+          ports:
+            - name: gvmd
+              containerPort: 9390
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: gvmd
+          readinessProbe:
+            tcpSocket:
+              port: gvmd
+          volumeMounts:
+            - name: run-dir
+              mountPath: /run
+            - name: run-dir
+              subPath: gvm
+              mountPath: /run/gvm
+            - name: run-dir
+              subPath: ospd
+              mountPath: /run/ospd
+            - name: data-volume
+              subPath: {{ include "gvm.dataSubPathPrefix" . }}openvas
+              mountPath: /var/lib/openvas
+            - name: data-volume
+              subPath: {{ include "gvm.dataSubPathPrefix" . }}gvm
+              mountPath: /var/lib/gvm
+            # without /var/lib/gvm/gvmd directory, the gvmd will
+            # complain about /var/lib/gvm/gvmd/gnupg/ directory
+            - name: data-volume
+              subPath: {{ include "gvm.dataSubPathPrefix" . }}gvm/gvmd
+              mountPath: /var/lib/gvm/gvmd
+          resources:
+            {{- toYaml .Values.resources.gvmd | nindent 12 }}
+        - name: {{ .Chart.Name }}-openvas-connector
+          image: "{{ tpl .Values.image.socat.registry . }}/{{ tpl .Values.image.socat.repository . }}:{{ tpl .Values.image.socat.tag . }}"
+          imagePullPolicy: {{ tpl .Values.image.socat.pullPolicy . }}
+          args: ["-d", "-d", "UNIX-LISTEN:/run/ospd/ospd.sock,fork", "TCP4-CONNECT:{{ include "gvm.fullname" . }}-openvas:9391"]
+          volumeMounts:
+            - name: run-dir
+              mountPath: /run
+            - name: run-dir
+              subPath: ospd
+              mountPath: /run/ospd
+          resources:
+            {{- toYaml .Values.resources.gvmdOpenvasConnector | nindent 12 }}
+      volumes:
+        - name: run-dir
+          emptyDir: {}
+        - name: data-volume
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ tpl .Values.persistence.existingClaim . | default (include "gvm.fullname" .) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
